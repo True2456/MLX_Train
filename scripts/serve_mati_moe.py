@@ -99,21 +99,60 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
                     + "(Pass --load-model /path/to/base_gemma4 to run live MLX token generation)"
                 )
 
-            response_payload = {
-                "id": "chatcmpl-mati-moe",
-                "object": "chat.completion",
-                "model": "mati-12b-multilora-moe",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": response_text},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": len(last_prompt.split()), "completion_tokens": 30, "total_tokens": 0},
-                "mati_moe_telemetry": routing,
-            }
-            self._send_json(200, response_payload)
+            if body.get("stream", False):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+
+                chunk_payload = {
+                    "id": "chatcmpl-mati-moe",
+                    "object": "chat.completion.chunk",
+                    "model": "mati-12b-multilora-moe",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": response_text},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                self.wfile.write(f"data: {json.dumps(chunk_payload)}\n\n".encode("utf-8"))
+                self.wfile.flush()
+
+                stop_payload = {
+                    "id": "chatcmpl-mati-moe",
+                    "object": "chat.completion.chunk",
+                    "model": "mati-12b-multilora-moe",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+                self.wfile.write(f"data: {json.dumps(stop_payload)}\n\n".encode("utf-8"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            else:
+                response_payload = {
+                    "id": "chatcmpl-mati-moe",
+                    "object": "chat.completion",
+                    "model": "mati-12b-multilora-moe",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": response_text},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": len(last_prompt.split()), "completion_tokens": 30, "total_tokens": 0},
+                    "mati_moe_telemetry": routing,
+                }
+                self._send_json(200, response_payload)
         else:
             self._send_json(404, {"error": "Endpoint not found"})
 
