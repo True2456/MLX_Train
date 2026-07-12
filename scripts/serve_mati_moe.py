@@ -372,6 +372,7 @@ def main():
     print(f"Live Generation:  {'ENABLED' if MODEL_LOADED else 'OFF (stub)'}")
     print("===================================================================\n", flush=True)
 
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer(("127.0.0.1", args.port), MoEHTTPRequestHandler)
     try:
         server.serve_forever()
