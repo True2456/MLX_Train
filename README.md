@@ -24,7 +24,7 @@ Benchmarks recorded fine-tuning **Gemma 4 12B** across **48 LoRA target layers**
 | Sequence Length | Batch Size | Gradient Checkpointing | Token Throughput | Iteration Time | Peak Memory | Swapping / Lag |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **8,192 tokens** | `2` | **Enabled (`true`)** | **339.25 tokens/sec** | **~47s / step** | **99.58 GB** | **None (0% Swap)** |
-| **8,192 tokens (Expert 4 ASM)** | `4` | **Enabled (`true`)** | **317.51 tokens/sec** | **~15s / step** | **35.39 GB** | **None (Val Loss 0.080)** |
+| **8,192 tokens (Expert 4 ASM)** | `4` | **Enabled (`true`)** | **317.51 tokens/sec** | **~15s / step** | **35.39 GB** | **None (Val Loss 0.043 @ 2500 steps)** |
 | **4,096 tokens** | `2` | Enabled (`true`) | **410.12 tokens/sec** | ~20s / step | **54.89 GB** | None (0% Swap) |
 
 ---
