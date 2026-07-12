@@ -30,10 +30,17 @@ KEYWORDS = [
 
 def render_gemma4_native_prompt(instruction: str) -> str:
     return (
-        "<start_of_turn>user\n"
+        "<|turn>user\n"
         f"{instruction.strip()}\n"
-        "<end_of_turn>\n"
-        "<start_of_turn>model\n"
+        "<|turn>model\n"
+    )
+
+def render_gemma4_completion(reasoning: str, final_output: str) -> str:
+    return (
+        "<|channel>thought\n"
+        f"{reasoning.strip()}\n"
+        "<channel|>\n"
+        f"{final_output.strip()}\n"
     )
 
 def build_dataset():
@@ -54,16 +61,22 @@ def build_dataset():
             f"Decompile the following assembly routine `{func_name}` into idiomatic C source code:\n\n"
             f"```asm\n{asm_code.strip()}\n```"
         )
-        completion = (
+        reasoning = (
+            f"1. Analyze register allocations and stack frame allocation (`push`, `sub rsp`/`sub sp`).\n"
+            f"2. Trace parameter passing conventions across input arguments.\n"
+            f"3. Reconstruct loops, conditional branches (`je`, `jne`, `b.gt`), and return values into high-level C logic."
+        )
+        final_out = (
             f"### Decompiled C Implementation (`{func_name}`)\n\n"
             f"```c\n{c_code.strip()}\n```"
         )
+        completion = render_gemma4_completion(reasoning, final_out)
         prompt = render_gemma4_native_prompt(instruction)
         if prompt not in seen_prompts:
             seen_prompts.add(prompt)
             rows.append({
                 "prompt": prompt,
-                "completion": f"{completion}\n",
+                "completion": completion,
                 "source": "hf:LLM4Binary/decompile-bench",
                 "subset": "linux_elf_x86_arm64"
             })
@@ -74,20 +87,29 @@ def build_dataset():
 
     # Check if user provided HF_TOKEN for Gated repositories (e.g. bigcode/the-stack-smol)
     if HF_TOKEN:
-        print("2. [Gated Repo Detected] Harvesting Multi-OS C/C++/ASM from bigcode/the-stack-smol...")
+        print("2. [Gated Access Confirmed] Harvesting Multi-OS C/C++/ASM from bigcode/the-stack-smol...")
         try:
-            ds_gated = load_dataset("bigcode/the-stack-smol", "data_c", split="train", streaming=True, token=HF_TOKEN)
+            ds_gated = load_dataset("bigcode/the-stack-smol", split="train", streaming=True, token=HF_TOKEN)
             gated_count = 0
             for item in ds_gated:
+                lang = str(item.get("lang", "")).lower()
+                path = str(item.get("path", "")).lower()
+                if not any(k in lang or path.endswith(ext) for k in ["c", "c++", "assembly", "asm"] for ext in [".c", ".cpp", ".s", ".asm", ".h"]):
+                    continue
                 content = item.get("content", "")
                 if not content or len(content) < 50 or len(content) > 2000:
                     continue
                 instruction = (
-                    f"Audit the following cross-platform C systems implementation for ABI compliance, "
+                    f"Audit the following cross-platform C/Assembly systems implementation (`{path}`) for ABI compliance, "
                     f"memory alignment, and pointer safety across x86_64, ARM64, and RISC-V architectures:\n\n"
                     f"```c\n{content.strip()}\n```"
                 )
-                completion = (
+                reasoning = (
+                    f"1. Check data models (LP64 vs ILP32) and pointer size assumptions across target architectures.\n"
+                    f"2. Inspect structure alignment and compiler padding requirements.\n"
+                    f"3. Evaluate pointer safety, buffer overflow risks, and memory lifecycle management."
+                )
+                final_out = (
                     f"### Systems ABI & Cross-Platform Audit\n\n"
                     f"#### Architecture & Calling Convention Analysis\n"
                     f"1. **Pointer & Data Type Sizing:** Verified 64-bit LP64 data model (`sizeof(void*) == 8`).\n"
@@ -95,12 +117,13 @@ def build_dataset():
                     f"#### Source Code Implementation\n"
                     f"```c\n{content.strip()}\n```"
                 )
+                completion = render_gemma4_completion(reasoning, final_out)
                 prompt = render_gemma4_native_prompt(instruction)
                 if prompt not in seen_prompts:
                     seen_prompts.add(prompt)
                     rows.append({
                         "prompt": prompt,
-                        "completion": f"{completion}\n",
+                        "completion": completion,
                         "source": "hf:bigcode/the-stack-smol",
                         "subset": "multi_os_hardware_systems"
                     })
@@ -121,11 +144,13 @@ def build_dataset():
         inst_lower = f" {instruction.lower()} "
         if any(kw in inst_lower for kw in KEYWORDS):
             prompt = render_gemma4_native_prompt(instruction)
+            reasoning = "Analyze low-level C/C++ memory semantics, pointer arithmetic, and systems execution safety."
+            completion = render_gemma4_completion(reasoning, output.strip())
             if prompt not in seen_prompts:
                 seen_prompts.add(prompt)
                 rows.append({
                     "prompt": prompt,
-                    "completion": f"{output.strip()}\n",
+                    "completion": completion,
                     "source": "hf:sahil2801/CodeAlpaca-20k",
                     "subset": "asm_systems_c_lowlevel"
                 })
@@ -140,11 +165,13 @@ def build_dataset():
         inst_lower = f" {instruction.lower()} "
         if any(kw in inst_lower for kw in KEYWORDS):
             prompt = render_gemma4_native_prompt(instruction)
+            reasoning = "Trace architecture-specific pointer constraints, struct layouts, and kernel execution paths."
+            completion = render_gemma4_completion(reasoning, output.strip())
             if prompt not in seen_prompts:
                 seen_prompts.add(prompt)
                 rows.append({
                     "prompt": prompt,
-                    "completion": f"{output.strip()}\n",
+                    "completion": completion,
                     "source": "hf:nickrosh/Evol-Instruct-Code-80k-v1",
                     "subset": "asm_systems_evol_c"
                 })
