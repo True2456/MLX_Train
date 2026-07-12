@@ -1,29 +1,12 @@
-# MLX_Train: Native MultiLoRA-MoE Training & Serving Backend for Apple Silicon
+# MLX_Train: Specialist LoRA Adapter Training Toolkit for Apple Silicon
 
-**MLX_Train** (`mati_moe`) is a high-performance training and dynamic serving backend built on **Apple MLX**, designed to train disjoint domain specialist LoRA adapters (`Theory`, `Agentic`, `ASM/Systems`) and combine them into a unified **MultiLoRA Mixture-of-Experts (MoE)** stack on Apple Silicon.
-
----
-
-## 🏛️ Architecture Overview
-
-Instead of destructive linear weight merging (MergeKit), `MLX_Train` trains separate low-rank specialist adapters over a shared base model (`Gemma 4 12B / 26B`) and dynamically routes tokens at inference time via **Residual Boosting (MILE)** across layers 8–47:
-
-```
-                          ┌──► Theory Expert (Math / Security / Cyber)
-                          │
-Gemma 4 Base Model ───────┼──► Agentic Expert (Tool Calling / Structured JSON)
-                          │
-                          └──► ASM / Systems Expert (Decompilation / Auditing)
-                                    │
-                                    ▼
-                      Dynamic Top-K Sparse Gating Router
-```
+**MLX_Train** is a high-performance training toolkit and configuration suite built for fine-tuning **domain-specialist LoRA adapters** (`Theory`, `Agentic`, `ASM/Systems`) on Apple Silicon using **Apple MLX** (`mlx_lm`).
 
 ---
 
-## 💻 Hardware Requirements (Apple Silicon)
+## 💻 Hardware Requirements (Apple Silicon M-Series)
 
-`MLX_Train` leverages Apple Silicon's unified memory architecture and Metal Execution Engine for zero-latency tensor allocation.
+Fine-tuning large language models (`Gemma 4 12B / 26B`) natively on macOS leverages Apple Silicon's unified memory architecture and Metal Execution Engine.
 
 | Requirement | Minimum Specification | Recommended Production Setup |
 | :--- | :--- | :--- |
@@ -34,54 +17,83 @@ Gemma 4 Base Model ───────┼──► Agentic Expert (Tool Callin
 
 ---
 
-## ⚡ Verified Benchmark Speeds (Apple M5 Max — 128GB Unified Memory)
+## ⚡ Verified Training Benchmark Speeds (Apple M5 Max — 128GB Unified Memory)
 
-### 1. Specialist LoRA Training (`Gemma 4 12B` — 48 LoRA Layers)
+Benchmarks recorded fine-tuning **Gemma 4 12B** across **48 LoRA target layers** (`rank: 16`, `alpha: 32`):
 
-All benchmarks recorded on an **Apple M5 Max (128GB Unified RAM)** using `mlx_lm.tuner.trainer`:
-
-| Sequence Length | Batch Size | Gradient Checkpointing | Token Throughput | Peak Memory | Swapping / Lag |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| **8,192 tokens** | `2` | **Enabled (`true`)** | **339.25 tokens/sec** | **99.58 GB** | **None (0% Swap)** |
-| **4,096 tokens** | `2` | Enabled (`true`) | **410.12 tokens/sec** | **54.89 GB** | None (0% Swap) |
-
-> **Critical Performance Discovery:**  
-> When training multi-turn `agentic` data at `--max-seq-length 8192`, **gradient checkpointing (`grad_checkpoint: true`)** is mandatory. Without checkpointing, activation graphs swell to ~643 GB, triggering macOS virtual memory swapping to NVMe SSD and dropping throughput to `<10 tokens/sec`. With checkpointing enabled, peak RAM remains locked at **99.5 GB** running at **339.25 tokens/sec**.
-
-### 2. MultiLoRA-MoE Inference & Dynamic Serving
-
-| Metric | Measured Performance (M5 Max 128GB) |
-| :--- | :--- |
-| **Generation Throughput (BF16 Base + Top-2 Experts)** | **42 – 58 tokens/sec** |
-| **Dynamic Gating Latency Overhead** | **< 1.2 ms per token** |
-| **Active Memory Footprint (Serving)** | **~26.4 GB total** |
+| Sequence Length | Batch Size | Gradient Checkpointing | Token Throughput | Iteration Time | Peak Memory | Swapping / Lag |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **8,192 tokens** | `2` | **Enabled (`true`)** | **339.25 tokens/sec** | **~47s / step** | **99.58 GB** | **None (0% Swap)** |
+| **4,096 tokens** | `2` | Enabled (`true`) | **410.12 tokens/sec** | ~20s / step | **54.89 GB** | None (0% Swap) |
 
 ---
 
-## 🚀 Quickstart & Installation
+## 🚨 Critical Apple Silicon Fine-Tuning Best Practices
+
+When training specialist LoRA adapters using `mlx_lm lora`:
+
+1. **Always Enable Gradient Checkpointing (`grad_checkpoint: true`):**
+   * When training at `--max-seq-length 8192`, you **MUST** enable gradient checkpointing in your YAML config or CLI (`--grad-checkpoint`).
+   * **Why:** Without checkpointing, storing 88-layer intermediate backpropagation activations requires **~643 GB virtual memory**, forcing macOS to page GPU buffers to NVMe SSD. That causes severe system lag and command buffer aborts. With checkpointing enabled, peak RAM stays locked at **~99.5 GB** with zero SSD swapping.
+
+2. **Never Set `max-seq-length` Below Prompt Length (`8192` Required for Agentic):**
+   * In multi-turn Agentic datasets where system prompts + tool schemas are ~5,000 tokens long, setting `max-seq-length: 4096` truncates away the assistant completion tokens (`ntoks = 0`).
+   * **Why:** This triggers a divide-by-zero error in `mlx_lm.tuner.trainer`, producing corrupted loss/token counters and dropping real training density from **~12,410 tokens/step down to ~118 tokens/step**.
+
+3. **Optimal Iteration & Coverage Targets by Specialist:**
+   * **Theory (`Expert 0` | Math & Reasoning):** 2,000–3,000 steps (~25M tokens). Up to 10,000 steps (~1 full epoch on 21k samples).
+   * **Agentic (`Expert 1` | Native Tool Calling):** 2,500–3,000 total steps (~25–30M tokens). **Do not train for 10,000 steps**—overfitting Rank-16 LoRA causes mode collapse.
+   * **ASM & Systems (`Expert 4` | Low-Level Auditing):** 1,000 steps on curated seed sets.
+
+---
+
+## 🚀 Installation & Setup
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/True2456/MLX_Train.git
 cd MLX_Train
 
-# 2. Create virtual environment and install dependencies
+# 2. Create virtual environment and install MLX
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
-pip install mlx mlx-lm pytest
+pip install mlx mlx-lm
 ```
 
 ---
 
-## 🛠️ Training Specialist Adapters
+## 📂 Configuration Files (`config/`)
 
-Configuration files are provided in `config/`:
-- `config/theory_lora.yaml` (`Expert 0`: Math & Security)
-- `config/agentic_lora.yaml` (`Expert 1`: Native Tool Calling)
-- `config/asm_systems_lora.yaml` (`Expert 4`: Low-Level Assembly & Decompilation)
+Ready-to-use production fine-tuning configs are located in `config/`:
+* [`config/agentic_lora.yaml`](config/agentic_lora.yaml) — Specialist for tool calling, structured output, and multi-step reasoning.
+* [`config/theory_lora.yaml`](config/theory_lora.yaml) — Specialist for math, cybersecurity, and conceptual reasoning.
+* [`config/asm_systems_lora.yaml`](config/asm_systems_lora.yaml) — Specialist for low-level assembly and binary analysis.
 
-### Recommended Production Training Command
+### Example Configuration (`config/agentic_lora.yaml`)
+```yaml
+model: "models/gemma12b/base_gemma4_shim"
+train: true
+data: "curated/specialists/gemma12b/agentic"
+adapter_path: "models/gemma12b/agentic_lora"
+num_layers: 48
+batch_size: 2
+iters: 3000
+learning_rate: 1e-5
+save_every: 100
+grad_checkpoint: true
+max_seq_length: 8192
+lora_parameters:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  scale: 10.0
+```
+
+---
+
+## 🎯 Launching LoRA Training
+
+Run training directly via `mlx_lm lora`:
 
 ```bash
 python3 -m mlx_lm lora -c config/agentic_lora.yaml \
@@ -90,26 +102,17 @@ python3 -m mlx_lm lora -c config/agentic_lora.yaml \
   --val-batches 5 \
   --grad-checkpoint \
   --steps-per-report 1 \
-  --iters 3000
+  --iters 500
 ```
 
-### Critical MLX Apple Silicon Best Practices:
-1. **Always enable `--grad-checkpoint`** when sequence lengths exceed 4,096 tokens.
-2. **Never set `max_seq_length` smaller than prompt length**: If a prompt exceeds `max_seq_length`, `mlx_lm` truncates away the assistant completion tokens (`ntoks = 0`), producing a divide-by-zero error.
-
----
-
-## 🧪 Testing & Production Verification
-
-Run the comprehensive 18-test verification suite to validate router gating, residual boosting, and multimodal compatibility:
-
+To resume training from a saved adapter checkpoint:
 ```bash
-pytest tests/ -v
+python3 -m mlx_lm lora -c config/agentic_lora.yaml \
+  --resume-adapter-file models/gemma12b/agentic_lora/0000200_adapters.safetensors \
+  --max-seq-length 8192 \
+  --batch-size 2 \
+  --val-batches 5 \
+  --grad-checkpoint \
+  --steps-per-report 1 \
+  --iters 500
 ```
-
----
-
-## 📚 Documentation & Technical Reports
-
-- **Dual/Multi-LoRA MoE Technical Report:** [`docs/MATI_12B_DUAL_LORA_MOE_TECHNICAL_REPORT.md`](docs/MATI_12B_DUAL_LORA_MOE_TECHNICAL_REPORT.md)
-- **Gemma 4 12B Training Plan:** [`docs/GEMMA12B_MOE_TRAINING_PLAN.md`](docs/GEMMA12B_MOE_TRAINING_PLAN.md)

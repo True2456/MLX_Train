@@ -18,6 +18,11 @@ models/
 *.bin
 *.pt
 
+# MoE Serving Backend & Docs (Local Only)
+mati_moe/
+tests/
+docs/
+
 # Training Logs & Temporary Files
 *.log
 train_specialists.*
