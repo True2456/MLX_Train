@@ -180,22 +180,6 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
         dominant_name = routing["dominant_expert"]
         weights = routing["weights"]
 
-        # Agentic LoRA currently collapses to gibberish on Gemma-4 native tool prompts
-        # (verified: theory emits <|tool_call>…; agentic emits noise → Mati parses as action none).
-        # Native / tool-declaration prompts must use theory until agentic is retrained.
-        force_theory = native_mode or ("<|tool>" in last_prompt) or ("<|tool_call>" in last_prompt)
-        if force_theory and dominant_name != "theory":
-            print(
-                f"expert override: {dominant_name} → theory (native/tool prompt)",
-                flush=True,
-            )
-            dominant_name = "theory"
-            routing = {
-                **routing,
-                "dominant_expert": "theory",
-                "expert_override": "theory_native_tools",
-            }
-
         header = (
             f"[Mati 12B MoE Routed -> {dominant_name.upper()} ({weights.get(dominant_name, 0)*100:.1f}%)]\n"
             f"Telemetry: Theory={weights['theory']*100:.1f}% | "
@@ -228,6 +212,12 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
             else:
                 try:
                     from mlx_lm import stream_generate
+                    from mlx_lm.sample_utils import make_logits_processors, make_sampler
+
+                    sampler = make_sampler(temp=0.2)
+                    logits_processors = make_logits_processors(
+                        repetition_penalty=1.15, repetition_context_size=64
+                    )
 
                     with GEN_LOCK:
                         model, tokenizer = _load_expert(dominant_name)
@@ -240,7 +230,12 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
                             flush=True,
                         )
                         for resp in stream_generate(
-                            model, tokenizer, prompt=prompt, max_tokens=max_toks
+                            model,
+                            tokenizer,
+                            prompt=prompt,
+                            max_tokens=max_toks,
+                            sampler=sampler,
+                            logits_processors=logits_processors,
                         ):
                             if resp.text:
                                 self._sse_chunk(resp.text)
@@ -266,6 +261,12 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
         if MODEL_LOADED:
             try:
                 from mlx_lm import generate
+                from mlx_lm.sample_utils import make_logits_processors, make_sampler
+
+                sampler = make_sampler(temp=0.2)
+                logits_processors = make_logits_processors(
+                    repetition_penalty=1.15, repetition_context_size=64
+                )
 
                 with GEN_LOCK:
                     model, tokenizer = _load_expert(dominant_name)
@@ -273,7 +274,13 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
                         tokenizer, messages, native_mode=native_mode, last_prompt=last_prompt
                     )
                     gen_text = generate(
-                        model, tokenizer, prompt=prompt, max_tokens=max_toks, verbose=False
+                        model,
+                        tokenizer,
+                        prompt=prompt,
+                        max_tokens=max_toks,
+                        verbose=False,
+                        sampler=sampler,
+                        logits_processors=logits_processors,
                     )
                 if isinstance(gen_text, str) and gen_text.startswith(prompt):
                     gen_text = gen_text[len(prompt) :]
