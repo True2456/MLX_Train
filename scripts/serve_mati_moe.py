@@ -8,7 +8,11 @@ prompts and receive dynamically routed responses across Theory, Agentic, and ASM
 
 import argparse
 import json
+import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mati_moe import MatiMoEEngine
 
 ENGINE = None
