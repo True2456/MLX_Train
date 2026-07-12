@@ -226,38 +226,24 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._sse_chunk(stub)
             else:
-                # mlx_lm.stream_generate hangs under ThreadingHTTPServer worker threads
-                # after a few tokens. generate() is reliable; emit fake SSE chunks.
                 try:
-                    from mlx_lm import generate
+                    from mlx_lm import stream_generate
 
                     with GEN_LOCK:
-                        self.wfile.write(b": moe-acquire-lock\n\n")
-                        self.wfile.flush()
                         model, tokenizer = _load_expert(dominant_name)
                         prompt = _build_prompt(
                             tokenizer, messages, native_mode=native_mode, last_prompt=last_prompt
                         )
                         print(
-                            f"generate(streamed) expert={dominant_name} max_tokens={max_toks} "
+                            f"stream_generate expert={dominant_name} max_tokens={max_toks} "
                             f"prompt_chars={len(prompt)}",
                             flush=True,
                         )
-                        self.wfile.write(
-                            f": moe-prefill chars={len(prompt)}\n\n".encode("utf-8")
-                        )
-                        self.wfile.flush()
-                        gen_text = generate(
-                            model, tokenizer, prompt=prompt, max_tokens=max_toks, verbose=False
-                        )
-                    if isinstance(gen_text, str) and gen_text.startswith(prompt):
-                        gen_text = gen_text[len(prompt) :]
-                    preview = (gen_text or "").replace("\n", "\\n")[:180]
-                    print(f"generate done chars={len(gen_text or '')} preview={preview!r}", flush=True)
-                    # Chunk so remote clients still see progressive SSE tokens.
-                    step = 24
-                    for i in range(0, len(gen_text), step):
-                        self._sse_chunk(gen_text[i : i + step])
+                        for resp in stream_generate(
+                            model, tokenizer, prompt=prompt, max_tokens=max_toks
+                        ):
+                            if resp.text:
+                                self._sse_chunk(resp.text)
                 except (BrokenPipeError, ConnectionResetError):
                     print("client disconnected during stream", flush=True)
                     return
