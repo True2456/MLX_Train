@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,8 @@ BASE_PATH: Path | None = None
 ADAPTER_DIRS: dict[str, Path] = {}
 # Lazy cache: expert_name -> (model, tokenizer)
 EXPERT_MODELS: dict[str, tuple[Any, Any]] = {}
+# MLX Metal is not safe for concurrent generate/stream_generate.
+GEN_LOCK = threading.Lock()
 
 
 def _message_text(content: Any) -> str:
@@ -40,30 +43,35 @@ def _message_text(content: Any) -> str:
     return str(content) if content is not None else ""
 
 
+SHARED_BASE_MODEL = None
+SHARED_TOKENIZER = None
+CURRENT_EXPERT = None
+
+
 def _load_expert(expert: str):
-    """Load base + specialist LoRA once per expert (cached)."""
-    if expert in EXPERT_MODELS:
-        return EXPERT_MODELS[expert]
+    """Load base model once and switch specialist LoRA adapters dynamically (<0.1s)."""
+    global SHARED_BASE_MODEL, SHARED_TOKENIZER, CURRENT_EXPERT
 
     assert BASE_PATH is not None
     from mlx_lm.utils import load_adapters, load_model, load_tokenizer
 
-    adapter_dir = ADAPTER_DIRS.get(expert) or ADAPTER_DIRS["theory"]
-    print(f"Loading expert '{expert}' from {adapter_dir} …", flush=True)
-    model, config = load_model(BASE_PATH, lazy=False, strict=False)
-    tokenizer = load_tokenizer(
-        BASE_PATH,
-        eos_token_ids=config.get("eos_token_id", None),
-    )
-    if (adapter_dir / "adapters.safetensors").is_file():
-        model = load_adapters(model, str(adapter_dir))
-        model.eval()
-        print(f"  adapters loaded: {adapter_dir}", flush=True)
-    else:
-        print(f"  WARNING: no adapters at {adapter_dir} — base only", flush=True)
+    if SHARED_BASE_MODEL is None:
+        print(f"Loading shared base model from {BASE_PATH} …", flush=True)
+        SHARED_BASE_MODEL, config = load_model(BASE_PATH, lazy=False, strict=False)
+        SHARED_TOKENIZER = load_tokenizer(
+            BASE_PATH,
+            eos_token_ids=config.get("eos_token_id", None),
+        )
 
-    EXPERT_MODELS[expert] = (model, tokenizer)
-    return EXPERT_MODELS[expert]
+    if CURRENT_EXPERT != expert:
+        adapter_dir = ADAPTER_DIRS.get(expert) or ADAPTER_DIRS["theory"]
+        print(f"Switching active specialist -> '{expert}' ({adapter_dir})", flush=True)
+        if (adapter_dir / "adapters.safetensors").is_file():
+            SHARED_BASE_MODEL = load_adapters(SHARED_BASE_MODEL, str(adapter_dir))
+            SHARED_BASE_MODEL.eval()
+        CURRENT_EXPERT = expert
+
+    return SHARED_BASE_MODEL, SHARED_TOKENIZER
 
 
 def _build_prompt(tokenizer, messages: list[dict], *, native_mode: bool, last_prompt: str) -> str:
@@ -172,8 +180,24 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
         dominant_name = routing["dominant_expert"]
         weights = routing["weights"]
 
+        # Agentic LoRA currently collapses to gibberish on Gemma-4 native tool prompts
+        # (verified: theory emits <|tool_call>…; agentic emits noise → Mati parses as action none).
+        # Native / tool-declaration prompts must use theory until agentic is retrained.
+        force_theory = native_mode or ("<|tool>" in last_prompt) or ("<|tool_call>" in last_prompt)
+        if force_theory and dominant_name != "theory":
+            print(
+                f"expert override: {dominant_name} → theory (native/tool prompt)",
+                flush=True,
+            )
+            dominant_name = "theory"
+            routing = {
+                **routing,
+                "dominant_expert": "theory",
+                "expert_override": "theory_native_tools",
+            }
+
         header = (
-            f"[Mati 12B MoE Routed -> {dominant_name.upper()} ({weights[dominant_name]*100:.1f}%)]\n"
+            f"[Mati 12B MoE Routed -> {dominant_name.upper()} ({weights.get(dominant_name, 0)*100:.1f}%)]\n"
             f"Telemetry: Theory={weights['theory']*100:.1f}% | "
             f"Agentic={weights['agentic']*100:.1f}% | ASM={weights['asm_systems']*100:.1f}%\n"
         )
@@ -186,6 +210,10 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("X-Mati-MoE-Expert", dominant_name)
             self.end_headers()
+            # Comment keepalives are ignored by OpenAI SSE clients but prove the stream is live
+            # before potentially long expert-load / prefill under GEN_LOCK.
+            self.wfile.write(b": moe-stream-open\n\n")
+            self.wfile.flush()
             self._sse_chunk("", role="assistant")
 
             if not native_mode:
@@ -198,30 +226,54 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._sse_chunk(stub)
             else:
+                # mlx_lm.stream_generate hangs under ThreadingHTTPServer worker threads
+                # after a few tokens. generate() is reliable; emit fake SSE chunks.
                 try:
-                    from mlx_lm import stream_generate
+                    from mlx_lm import generate
 
-                    model, tokenizer = _load_expert(dominant_name)
-                    prompt = _build_prompt(
-                        tokenizer, messages, native_mode=native_mode, last_prompt=last_prompt
-                    )
-                    print(
-                        f"stream_generate expert={dominant_name} max_tokens={max_toks} "
-                        f"prompt_chars={len(prompt)}",
-                        flush=True,
-                    )
-                    for resp in stream_generate(
-                        model, tokenizer, prompt=prompt, max_tokens=max_toks
-                    ):
-                        piece = getattr(resp, "text", None) or ""
-                        if piece:
-                            self._sse_chunk(piece)
+                    with GEN_LOCK:
+                        self.wfile.write(b": moe-acquire-lock\n\n")
+                        self.wfile.flush()
+                        model, tokenizer = _load_expert(dominant_name)
+                        prompt = _build_prompt(
+                            tokenizer, messages, native_mode=native_mode, last_prompt=last_prompt
+                        )
+                        print(
+                            f"generate(streamed) expert={dominant_name} max_tokens={max_toks} "
+                            f"prompt_chars={len(prompt)}",
+                            flush=True,
+                        )
+                        self.wfile.write(
+                            f": moe-prefill chars={len(prompt)}\n\n".encode("utf-8")
+                        )
+                        self.wfile.flush()
+                        gen_text = generate(
+                            model, tokenizer, prompt=prompt, max_tokens=max_toks, verbose=False
+                        )
+                    if isinstance(gen_text, str) and gen_text.startswith(prompt):
+                        gen_text = gen_text[len(prompt) :]
+                    preview = (gen_text or "").replace("\n", "\\n")[:180]
+                    print(f"generate done chars={len(gen_text or '')} preview={preview!r}", flush=True)
+                    # Chunk so remote clients still see progressive SSE tokens.
+                    step = 24
+                    for i in range(0, len(gen_text), step):
+                        self._sse_chunk(gen_text[i : i + step])
+                except (BrokenPipeError, ConnectionResetError):
+                    print("client disconnected during stream", flush=True)
+                    return
                 except Exception as e:
-                    self._sse_chunk(f"[MLX Generation Error: {e}]")
+                    try:
+                        self._sse_chunk(f"[MLX Generation Error: {e}]")
+                    except (BrokenPipeError, ConnectionResetError):
+                        print(f"client disconnected after error: {e}", flush=True)
+                        return
 
-            self._sse_chunk(None, finish="stop")
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
+            try:
+                self._sse_chunk(None, finish="stop")
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                print("client disconnected before stream close", flush=True)
             return
 
         # Non-streaming path
@@ -229,13 +281,14 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
             try:
                 from mlx_lm import generate
 
-                model, tokenizer = _load_expert(dominant_name)
-                prompt = _build_prompt(
-                    tokenizer, messages, native_mode=native_mode, last_prompt=last_prompt
-                )
-                gen_text = generate(
-                    model, tokenizer, prompt=prompt, max_tokens=max_toks, verbose=False
-                )
+                with GEN_LOCK:
+                    model, tokenizer = _load_expert(dominant_name)
+                    prompt = _build_prompt(
+                        tokenizer, messages, native_mode=native_mode, last_prompt=last_prompt
+                    )
+                    gen_text = generate(
+                        model, tokenizer, prompt=prompt, max_tokens=max_toks, verbose=False
+                    )
                 if isinstance(gen_text, str) and gen_text.startswith(prompt):
                     gen_text = gen_text[len(prompt) :]
                 response_text = gen_text if native_mode else (header + gen_text)
