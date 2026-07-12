@@ -1,0 +1,22 @@
+{
+  "models": {
+    "student": "/Users/true/Documents/Mati_Train/models/gemma12b/base_gemma4_shim"
+  },
+  "training": {
+    "default_train_iters": 2000,
+    "default_train_output": "models/mlx_self_training/train_only",
+    "learning_rate": 1e-5,
+    "lora_rank": 16,
+    "lora_alpha": 32,
+    "num_layers": 48,
+    "lora_keys": [
+      "self_attn.q_proj",
+      "self_attn.k_proj",
+      "self_attn.v_proj",
+      "self_attn.o_proj",
+      "mlp.gate_proj",
+      "mlp.up_proj",
+      "mlp.down_proj"
+    ]
+  }
+}

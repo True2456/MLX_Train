@@ -1,0 +1,23 @@
+# Python environment & caches
+.venv/
+**/__pycache__/
+**/.cache/
+*.pyc
+.DS_Store
+
+# Training Data (Strictly Excluded)
+curated/
+agentic/
+theory/
+*.jsonl
+*.jsonl.gz
+
+# Model Checkpoints & Adapters (Strictly Excluded)
+models/
+*.safetensors
+*.bin
+*.pt
+
+# Training Logs & Temporary Files
+*.log
+train_specialists.*
