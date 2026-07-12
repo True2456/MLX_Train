@@ -180,6 +180,20 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
         dominant_name = routing["dominant_expert"]
         weights = routing["weights"]
 
+        # Route tool-declaration / native prompts to theory so coherent JSON tool calls are generated
+        force_theory = native_mode or ("<|tool>" in last_prompt) or ("<|tool_call>" in last_prompt)
+        if force_theory and dominant_name != "theory":
+            print(
+                f"expert override: {dominant_name} → theory (native/tool prompt)",
+                flush=True,
+            )
+            dominant_name = "theory"
+            routing = {
+                **routing,
+                "dominant_expert": "theory",
+                "expert_override": "theory_native_tools",
+            }
+
         header = (
             f"[Mati 12B MoE Routed -> {dominant_name.upper()} ({weights.get(dominant_name, 0)*100:.1f}%)]\n"
             f"Telemetry: Theory={weights['theory']*100:.1f}% | "
