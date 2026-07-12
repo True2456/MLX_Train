@@ -185,6 +185,192 @@ CURATED_ASM_SYSTEMS_DATA = [
         "source": "decompile_bench_curated",
         "subset": "crypto_hash_asm",
     },
+    {
+        "instruction": (
+            "Analyze the following Apple Silicon ARM64 assembly snippet utilizing Pointer Authentication Codes (PAC). Explain how PAC protects the return address and identify if there is any strip/sign gadget misuse:\n\n"
+            "_secure_dispatch:\n"
+            "    paciasp\n"
+            "    stp     x29, x30, [sp, #-32]!\n"
+            "    mov     x29, sp\n"
+            "    str     x0, [sp, #16]\n"
+            "    ldr     x8, [sp, #16]\n"
+            "    blr     x8\n"
+            "    ldp     x29, x30, [sp], #32\n"
+            "    autiasp\n"
+            "    ret"
+        ),
+        "output": (
+            "### Pointer Authentication Code (PAC) Inspection\n\n"
+            "#### Mechanism Analysis\n"
+            "1. **Prologue Protection (`paciasp`):** Computes a cryptographic signature over the return address (`x30`) combined with the stack pointer (`sp`) using the A-key, inserting the PAC tag into the unused upper bits of `x30` before pushing to stack.\n"
+            "2. **Epilogue Verification (`autiasp`):** Authenticates the signed return address in `x30` against `sp`. If modified on stack, authentication invalidates the pointer bits, causing an immediate kernel segmentation fault on `ret`.\n\n"
+            "#### Vulnerability Audit (Indirect Call Clobbering)\n"
+            "While stack return flow is authenticated, the indirect function pointer call (`blr x8`) loaded from `[sp, #16]` lacks branch target authentication (`blraa` / `braa`). An attacker who overwrites local stack slot `[sp, #16]` can divert execution flow to any arbitrary instruction."
+        ),
+        "source": "debinvul_curated",
+        "subset": "arm64_pac_audit",
+    },
+    {
+        "instruction": (
+            "Decompile the following x86_64 GCC `-O2` compiled switch-case jump table routine into C and explain the range bounds check:\n\n"
+            "process_opcode:\n"
+            "    sub     edi, 10\n"
+            "    cmp     edi, 3\n"
+            "    ja      .L_default\n"
+            "    mov     rdi, QWORD PTR [rdi*8 + .L_table]\n"
+            "    jmp     rdi\n"
+            ".L_table:\n"
+            "    .quad   .L_case10\n"
+            "    .quad   .L_case11\n"
+            "    .quad   .L_default\n"
+            "    .quad   .L_case13"
+        ),
+        "output": (
+            "### Decompiled Switch-Case Logic with Jump Table\n\n"
+            "#### Decompiled C Implementation\n"
+            "```c\n"
+            "void process_opcode(unsigned int opcode) {\n"
+            "    switch (opcode) {\n"
+            "        case 10: handle_case10(); break;\n"
+            "        case 11: handle_case11(); break;\n"
+            "        case 13: handle_case13(); break;\n"
+            "        default: handle_default(); break;\n"
+            "    }\n"
+            "}\n"
+            "```\n\n"
+            "#### Assembly Optimization Analysis\n"
+            "1. **Normalization (`sub edi, 10`):** Shifts the switch range from `[10..13]` down to `[0..3]`.\n"
+            "2. **Unsigned Bounds Check (`cmp edi, 3; ja .L_default`):** Any original input `< 10` wraps around to a large unsigned integer (`> 3`) and correctly branches to `.L_default` via unsigned jump above (`ja`).\n"
+            "3. **Jump Table Dereference:** Uses scaled indexed addressing `[rdi*8 + .L_table]` for $O(1)$ dispatch."
+        ),
+        "source": "decompile_bench_curated",
+        "subset": "x86_64_jump_table",
+    },
+    {
+        "instruction": (
+            "Examine this ARM64 assembly loop utilizing NEON SIMD vector registers. Decompile the vectorized kernel into equivalent scalar C code:\n\n"
+            "vector_add:\n"
+            ".L_vector_loop:\n"
+            "    subs    x2, x2, #4\n"
+            "    ldr     q0, [x0], #16\n"
+            "    ldr     q1, [x1], #16\n"
+            "    fadd    v0.4s, v0.4s, v1.4s\n"
+            "    str     q0, [x0, #-16]\n"
+            "    b.gt    .L_vector_loop\n"
+            "    ret"
+        ),
+        "output": (
+            "### Decompiled SIMD Vector Kernel\n\n"
+            "#### Decompiled C Code\n"
+            "```c\n"
+            "void vector_add(float *in_out, const float *addend, size_t count) {\n"
+            "    // Processes 4 single-precision floats (128-bit NEON q-register) per iteration\n"
+            "    for (size_t i = 0; i < count; i += 4) {\n"
+            "        in_out[i + 0] += addend[i + 0];\n"
+            "        in_out[i + 1] += addend[i + 1];\n"
+            "        in_out[i + 2] += addend[i + 2];\n"
+            "        in_out[i + 3] += addend[i + 3];\n"
+            "    }\n"
+            "}\n"
+            "```\n\n"
+            "#### NEON Architectural Notes\n"
+            "`ldr q0, [x0], #16` performs post-indexed 128-bit vector loading and auto-increments the pointer by 16 bytes. `fadd v0.4s` executes 4 simultaneous IEEE-754 single-precision float additions."
+        ),
+        "source": "decompile_bench_curated",
+        "subset": "arm64_neon_simd",
+    },
+    {
+        "instruction": (
+            "Audit the following C++ virtual method call assembly pattern on x86_64 Linux. Explain how the vtable pointer (`_vptr`) is accessed and reconstruct the class interface:\n\n"
+            "dispatch_event:\n"
+            "    mov     rax, QWORD PTR [rdi]\n"
+            "    mov     rax, QWORD PTR [rax + 16]\n"
+            "    mov     esi, 1\n"
+            "    jmp     rax"
+        ),
+        "output": (
+            "### C++ Vtable Dispatch & Interface Reconstruction\n\n"
+            "#### Assembly Mechanics\n"
+            "1. **Object Instance (`rdi`):** In System V AMD64 C++ ABI, `rdi` points to the object instance `this`.\n"
+            "2. **Vtable Dereference (`mov rax, [rdi]`):** The first 8 bytes of a polymorphic class instance hold `_vptr`, pointing to the virtual method table.\n"
+            "3. **Slot Indexing (`mov rax, [rax + 16]`):** Loads the 3rd virtual function entry at byte offset `16` (`slot 2`).\n"
+            "4. **Tail Call (`jmp rax`):** Passes `this` in `rdi` and second argument `1` in `esi` directly into the virtual method.\n\n"
+            "#### Reconstructed C++ Interface\n"
+            "```cpp\n"
+            "class EventListener {\n"
+            "public:\n"
+            "    virtual ~EventListener() = default;           // Vtable slot 0 & 1 (deleting/complete dtor)\n"
+            "    virtual void on_event(int event_type) = 0;    // Vtable slot 2 (+16 bytes)\n"
+            "};\n\n"
+            "void dispatch_event(EventListener* listener) {\n"
+            "    listener->on_event(1);\n"
+            "}\n"
+            "```"
+        ),
+        "source": "systems_abi_curated",
+        "subset": "cpp_vtable_layout",
+    },
+    {
+        "instruction": (
+            "Examine this stripped Linux kernel `ioctl` assembly handler. Identify the Time-of-Check to Time-of-Use (TOCTOU) race condition vulnerability:\n\n"
+            "kernel_ioctl_handler:\n"
+            "    mov     r12, rsi\n"
+            "    mov     rdi, QWORD PTR [rsi]\n"
+            "    cmp     rdi, 1024\n"
+            "    ja      .L_err\n"
+            "    # Simulate sleep or scheduling yield\n"
+            "    call    schedule\n"
+            "    mov     rax, QWORD PTR [r12]\n"
+            "    mov     rdi, rax\n"
+            "    call    kmalloc\n"
+            "    ret"
+        ),
+        "output": (
+            "### Vulnerability Audit: Kernel TOCTOU Double-Fetch\n\n"
+            "#### Root Cause Diagnosis\n"
+            "1. **First Fetch (Check):** `mov rdi, [rsi]` reads a user-space memory buffer length directly from user pointer `rsi` and verifies `len <= 1024`.\n"
+            "2. **Context Switch Window:** During `call schedule` (or any preemption interval), another user thread can modify the memory value at `*rsi` to an arbitrarily large integer (`e.g., 0xFFFFFFFF`).\n"
+            "3. **Second Fetch (Use):** `mov rax, [r12]` re-reads the length from the same user pointer *without re-validating the bounds check*, passing the mutated attacker-controlled length to `kmalloc`.\n\n"
+            "#### Secure Remediation\n"
+            "Copy the user structure once into a kernel-stack local variable using `copy_from_user` and perform all validation and allocation strictly on the immutable local kernel copy."
+        ),
+        "source": "debinvul_curated",
+        "subset": "kernel_toctou_race",
+    },
+    {
+        "instruction": (
+            "Decompile the following RISC-V 64-bit (`RV64GC`) assembly routine into C code:\n\n"
+            "str_length:\n"
+            "    mv      a1, a0\n"
+            ".L_loop:\n"
+            "    lbu     a2, 0(a1)\n"
+            "    addi    a1, a1, 1\n"
+            "    bnez    a2, .L_loop\n"
+            "    sub     a0, a1, a0\n"
+            "    addi    a0, a0, -1\n"
+            "    ret"
+        ),
+        "output": (
+            "### Decompiled RISC-V 64 (`RV64GC`) Implementation\n\n"
+            "#### Decompiled C Function\n"
+            "```c\n"
+            "size_t str_length(const char *str) {\n"
+            "    const char *ptr = str;\n"
+            "    while (*ptr != '\\0') {\n"
+            "        ptr++;\n"
+            "    }\n"
+            "    return (size_t)(ptr - str);\n"
+            "}\n"
+            "```\n\n"
+            "#### Register Architecture Walkthrough\n"
+            "1. `mv a1, a0`: Copies base pointer `str` (`a0`) into scanning cursor `ptr` (`a1`).\n"
+            "2. `lbu a2, 0(a1)`: Loads unsigned byte (`char`) from memory.\n"
+            "3. `bnez a2, .L_loop`: Branches if character is non-zero.\n"
+            "4. `sub a0, a1, a0; addi a0, a0, -1`: Computes difference minus 1 (accounting for post-increment after null byte hit) and returns length in `a0`."
+        ),
+        "source": "decompile_bench_curated",
+        "subset": "riscv64_decomp",
+    },
 ]
 
 
