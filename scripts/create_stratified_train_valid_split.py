@@ -19,7 +19,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-INPUT_FILE = Path("/Users/true/Documents/Mati_Train/data/frontier_2026_verified_clean.jsonl")
+INPUT_FILE = Path("/Users/true/Documents/Mati_Train/data/frontier_procedural_combined_3881.jsonl")
 OUTPUT_DIR = Path("/Users/true/Documents/Mati_Train/data")
 THEORY_DIR = Path("/Users/true/Documents/Mati_Train/data_nemotron_theory")
 
