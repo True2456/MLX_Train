@@ -19,9 +19,9 @@ def main():
     # 1. Verify Specialist Adapter Files
     base_dir = Path("/Users/true/Documents/Mati_Train/models/gemma12b")
     specialists = {
-        "Theory (Expert 1 - lowest loss 0.6)": [
-            base_dir / "theory_lora" / "0003750_adapters.safetensors",
+        "Theory (Expert 0 - iter 11350)": [
             base_dir / "theory_lora" / "adapters.safetensors",
+            base_dir / "theory_lora" / "0011350_adapters.safetensors",
         ],
         "Agentic (Expert 2 - Multi-Turn Tool Call)": [
             base_dir / "agentic_lora" / "adapters.safetensors",

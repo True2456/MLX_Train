@@ -19,7 +19,6 @@ models/
 *.pt
 
 # MoE Serving Backend & Docs (Local Only)
-mati_moe/
 tests/
 docs/
 

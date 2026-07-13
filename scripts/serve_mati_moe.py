@@ -93,6 +93,77 @@ def _build_prompt(tokenizer, messages: list[dict], *, native_mode: bool, last_pr
         return last_prompt + "\n"
 
 
+def _normalize_moe_output(text: str, native_mode: bool, tool_profile: str = "auto") -> str:
+    """Normalize model outputs so tool calls match the requested harness profile."""
+    if not text:
+        return text
+    if "Action:" in text and "Arguments:" in text:
+        return text
+    if "<|tool_call>" in text:
+        return text
+
+    import re
+
+    clean_text = re.sub(r"^(?:<pad>:?|<bos>:?|\s+)+", "", text)
+    clean_text = re.sub(r"<pad>", "", clean_text).strip()
+
+    # Qwen-specific profile handling (only triggered if tool_profile in ('auto', 'qwen'))
+    if tool_profile in ("auto", "qwen"):
+        # Qwen XML Tool Call format (<tool_call>{"name": "...", "arguments": {...}}</tool_call>)
+        m_qwen_xml = re.search(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", clean_text, re.DOTALL)
+        if m_qwen_xml:
+            try:
+                data = json.loads(m_qwen_xml.group(1))
+                name = data.get("name")
+                args = json.dumps(data.get("arguments", {}))
+                if native_mode:
+                    return f"<|tool_call>call:{name}{args}<tool_call|>"
+                else:
+                    return f"Action: {name}\nArguments: {args}"
+            except Exception:
+                pass
+
+        # Qwen 2.5 ✿FUNCTION✿ format
+        m_qwen_fn = re.search(r"✿FUNCTION✿:\s*([a-zA-Z0-9_]+)\s*\n✿ARGS✿:\s*(\{.*?\})", clean_text, re.DOTALL)
+        if m_qwen_fn:
+            name = m_qwen_fn.group(1).strip()
+            args = m_qwen_fn.group(2).strip()
+            if native_mode:
+                return f"<|tool_call>call:{name}{args}<tool_call|>"
+            else:
+                return f"Action: {name}\nArguments: {args}"
+
+    m_code = re.search(r"```(?:bash|sh|python)?\s*\n(.*?)\n```", clean_text, re.DOTALL)
+    if m_code:
+        cmd = m_code.group(1).strip()
+        if native_mode:
+            return f'<|tool_call>call:bash{{cmd:<|"|>{cmd}<|"|>}}<tool_call|>'
+        else:
+            args_json = json.dumps({"cmd": cmd})
+            return f"Action: bash\nArguments: {args_json}"
+
+    for line in clean_text.splitlines():
+        line_str = line.strip()
+        line_str = re.sub(r"^(?:<pad>:?|<bos>:?|\s+)+", "", line_str)
+        m_call = re.search(r"([a-zA-Z0-9_]+)\{(.*?)\}", line_str)
+        if m_call:
+            name = m_call.group(1).strip()
+            raw_args = m_call.group(2).strip()
+            if native_mode:
+                return f"<|tool_call>call:{name}{{{raw_args}}}<tool_call|>"
+            else:
+                args_fixed = raw_args
+                fixed_try = re.sub(r"([a-zA-Z0-9_]+)\s*:", r'"\1":', raw_args)
+                try:
+                    json.loads("{" + fixed_try + "}")
+                    args_fixed = "{" + fixed_try + "}"
+                except Exception:
+                    args_fixed = "{" + raw_args + "}"
+                return f"Action: {name}\nArguments: {args_fixed}"
+
+    return clean_text
+
+
 class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -180,11 +251,20 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
         dominant_name = routing["dominant_expert"]
         weights = routing["weights"]
 
-        # Route tool-declaration / native prompts to theory so coherent JSON tool calls are generated
-        force_theory = native_mode or ("<|tool>" in last_prompt) or ("<|tool_call>" in last_prompt)
+        # Route tool-declaration / native / ReAct observation prompts to theory so coherent JSON tool calls are generated
+        force_theory = (
+            native_mode
+            or ("<|tool>" in last_prompt)
+            or ("<|tool_call>" in last_prompt)
+            or ("Observation:" in last_prompt)
+            or ("### OBSERVATION:" in last_prompt)
+            or ("Action:" in last_prompt)
+            or ("[HTB_" in last_prompt)
+            or ("retrieve_ctf" in last_prompt)
+        )
         if force_theory and dominant_name != "theory":
             print(
-                f"expert override: {dominant_name} → theory (native/tool prompt)",
+                f"expert override: {dominant_name} → theory (tool/observation prompt)",
                 flush=True,
             )
             dominant_name = "theory"
@@ -243,6 +323,7 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
                             f"prompt_chars={len(prompt)}",
                             flush=True,
                         )
+                        full_chunks = []
                         for resp in stream_generate(
                             model,
                             tokenizer,
@@ -252,7 +333,11 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
                             logits_processors=logits_processors,
                         ):
                             if resp.text:
-                                self._sse_chunk(resp.text)
+                                full_chunks.append(resp.text)
+                        normalized = _normalize_moe_output(
+                            "".join(full_chunks), native_mode=native_mode
+                        )
+                        self._sse_chunk(normalized)
                 except (BrokenPipeError, ConnectionResetError):
                     print("client disconnected during stream", flush=True)
                     return
@@ -296,8 +381,10 @@ class MoEHTTPRequestHandler(BaseHTTPRequestHandler):
                         sampler=sampler,
                         logits_processors=logits_processors,
                     )
+                tool_profile = str(body.get("tool_profile", "auto")).lower()
                 if isinstance(gen_text, str) and gen_text.startswith(prompt):
                     gen_text = gen_text[len(prompt) :]
+                gen_text = _normalize_moe_output(gen_text, native_mode=native_mode, tool_profile=tool_profile)
                 response_text = gen_text if native_mode else (header + gen_text)
             except Exception as e:
                 response_text = (
